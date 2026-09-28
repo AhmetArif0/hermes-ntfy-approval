@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -115,7 +116,11 @@ def test_silence_is_a_denial(home, phone, server_url, tmp_path):
     outcome = _guard(f"rm -rf {tmp_path / 'slow'}")
     assert outcome["approved"] is False
     assert "timeout" in outcome["message"]
-    assert any(e["event"] == "message_delete" for e in phone.events())  # the stale buttons are gone
+    # Hermes gives up at its deadline; the plugin's worker withdraws the notification just after.
+    withdrawn_by = time.monotonic() + 10
+    while not any(e["event"] == "message_delete" for e in phone.events()):  # the stale buttons go away
+        assert time.monotonic() < withdrawn_by, "the notification was not withdrawn"
+        time.sleep(0.1)
 
 
 def test_the_phone_sees_hermes_redacted_command(home, phone):
