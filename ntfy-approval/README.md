@@ -67,6 +67,8 @@ To go back to terminal and chat prompts: `hermes config set security.approval.tr
 - **Deny**: Hermes blocks the command and tells the agent not to try another way.
 - **No answer** before `approvals.timeout` (default 300 s): denied. The notification is then
   removed from your devices, and a late tap does nothing.
+- **You stop the turn** (`/stop`, Ctrl-C) while it waits: denied, and the notification is
+  removed right away.
 
 "Always allow" is never offered from the phone: an ntfy notification has room for three buttons,
 and permanently allowlisting a command from a lock screen is a step better taken at the
@@ -117,13 +119,14 @@ hermes config set NTFY_APPROVAL_TOPIC hermes-approvals
 
 ## Security and footprint
 
-- **`register()` only registers**: the `ntfy` approval transport and the `hermes ntfy-approval`
-  command. The transport stays inactive until you select it
+- **`register()` only registers**: the `ntfy` approval transport, the `hermes ntfy-approval`
+  command, and one observer hook, `post_approval_response`, which only withdraws a notification
+  Hermes has stopped waiting for. The transport stays inactive until you select it
   (`security.approval.transport: ntfy`).
 - **Network**: only to the configured ntfy server, and only while an approval is pending. The
-  plugin publishes one notification, reads the reply topic until an answer or the timeout, and
-  then deletes the notification. Redirects are not followed, and the access token is never put
-  inside a notification.
+  plugin publishes one notification, reads the reply topic until an answer, the timeout, or
+  Hermes stops waiting, and then deletes the notification. Redirects are not followed, and the
+  access token is never put inside a notification.
 - **What leaves your machine**: the notification title, Hermes' reason for asking, the command as
   Hermes redacted it (skip it with `send_command: false`), and three one-time answer codes. On
   `ntfy.sh` this passes through a public service. Use your own server if that matters to you.
@@ -132,8 +135,8 @@ hermes config set NTFY_APPROVAL_TOPIC hermes-approvals
   control, only users with read access can answer. Each code works once, only for its own
   request and button; anything else on the reply topic is ignored. Hermes separately rejects an
   answer that does not match the request or is not a choice it offered.
-- **No** subprocesses, downloads, file writes, config changes, background threads or hooks. It
-  reads the topic and token from your profile's `.env`, through Hermes' profile secret scope.
+- **No** subprocesses, downloads, file writes, config changes or background threads. It reads
+  the topic and token from your profile's `.env`, through Hermes' profile secret scope.
 - **Profiles**: each profile has its own settings and topic. On a gateway that serves several
   profiles from one process, Hermes currently calls approval transports without the profile's
   context (hermes-agent #114580). The plugin detects this and denies the request rather than use
@@ -142,6 +145,13 @@ hermes config set NTFY_APPROVAL_TOPIC hermes-approvals
 Design notes and verified facts: [DESIGN.md](https://github.com/AhmetArif0/hermes-ntfy-approval/blob/main/docs/DESIGN.md).
 
 ## Changelog
+
+### 1.0.1
+
+Stopping a turn (`/stop`, Ctrl-C) while an approval was on your phone left its buttons there
+until `approvals.timeout` ran out (5 minutes by default), and for good if Hermes exited in the
+meantime. Hermes had already denied the request, so a tap did nothing. The notification is now
+removed as soon as Hermes stops waiting.
 
 ### 1.0.0
 

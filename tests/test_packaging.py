@@ -51,15 +51,16 @@ def test_manifest_secrets_are_the_env_names_the_code_reads():
     manifest = _manifest()
     assert f"env: {plugin.TOPIC_ENV}" in manifest and f"env: {plugin.TOKEN_ENV}" in manifest
     assert "required:" not in manifest  # a required secret makes Hermes warn on every load
-    assert "provides_hooks" not in manifest and "provides_tools" not in manifest
+    assert "provides_tools" not in manifest
+    assert "provides_hooks:\n  - post_approval_response\n" in manifest  # the one hook register() adds
 
 
-def test_registers_only_the_transport_and_the_command():
+def test_registers_only_the_transport_the_command_and_one_hook():
     calls = []
     for node in ast.walk(_tree(PLUGIN / "__init__.py")):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr.startswith("register"):
             calls.append(node.func.attr)
-    assert calls == ["register_approval_transport", "register_cli_command"]
+    assert sorted(calls) == ["register_approval_transport", "register_cli_command", "register_hook"]
 
 
 def test_network_code_lives_only_in_client_py():

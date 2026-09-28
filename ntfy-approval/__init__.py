@@ -1,8 +1,9 @@
 """ntfy-approval: answer Hermes' approval prompts from your phone through ntfy.
 
-``register`` registers one approval transport (``ntfy``) and one CLI command
-(``hermes ntfy-approval``). The transport does nothing until the user selects it with
-``security.approval.transport: ntfy``. See README.md and docs/DESIGN.md.
+``register`` registers one approval transport (``ntfy``), one CLI command
+(``hermes ntfy-approval``) and one observer hook (``post_approval_response``, to withdraw a
+notification Hermes stopped waiting for). The transport does nothing until the user selects it
+with ``security.approval.transport: ntfy``. See README.md and docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 
-from .transport import ConfigError, make_settings, normalize_server, present as _present_request
+from .transport import ConfigError, make_settings, normalize_server, present as _present_request, stop_waiting
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +59,8 @@ def make_present(ctx, home: str, profile: str):
                 # profile's home. Refuse rather than use another profile's settings.
                 raise ProfileMismatch("the approval arrived outside its profile; refusing it")
             return _present_request(request, load_settings(ctx), profile=profile)
-        except TimeoutError:
-            logger.info("ntfy-approval: no answer before the approval timed out")
+        except TimeoutError as exc:
+            logger.info("ntfy-approval: %s", exc)
             raise
         except ConfigError as exc:
             logger.warning("ntfy-approval: not configured: %s", exc)
@@ -71,9 +72,19 @@ def make_present(ctx, home: str, profile: str):
     return present
 
 
+def on_approval_answered(request_id=None, **_kwargs) -> None:
+    """``post_approval_response``: Hermes has its answer or gave up (timeout, /stop, Ctrl-C).
+    Withdraw that request's notification if it is still on the phone. Never raises."""
+    try:
+        stop_waiting(request_id)
+    except Exception:
+        logger.debug("ntfy-approval: could not withdraw after the approval ended", exc_info=True)
+
+
 def register(ctx) -> None:
     home = _home()
     ctx.register_approval_transport(TRANSPORT_NAME, make_present(ctx, home, ctx.profile_name))
+    ctx.register_hook("post_approval_response", on_approval_answered)
 
     from . import cli
 

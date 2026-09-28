@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -72,7 +73,7 @@ def test_loads_through_the_real_plugin_manager(home, caplog):
     assert loaded.error is None, loaded.error
     assert manager._approval_transports["ntfy"].plugin_id == PLUGIN_KEY
     assert "ntfy-approval" in manager._cli_commands
-    assert not [name for name, callbacks in manager._hooks.items() if callbacks]  # registers no hooks
+    assert [name for name, callbacks in manager._hooks.items() if callbacks] == ["post_approval_response"]
 
 
 def test_the_settings_form_keeps_secrets_in_env(home):
@@ -121,6 +122,29 @@ def test_silence_is_a_denial(home, phone, server_url, tmp_path):
     while not any(e["event"] == "message_delete" for e in phone.events()):  # the stale buttons go away
         assert time.monotonic() < withdrawn_by, "the notification was not withdrawn"
         time.sleep(0.1)
+
+
+def test_a_stopped_turn_withdraws_the_notification_before_hermes_moves_on(home, phone, tmp_path):
+    """/stop or Ctrl-C while the phone shows the request: Hermes denies at once, and the buttons are
+    gone before its approval call returns, so they also go when Hermes exits right after."""
+    from tools.interrupt import set_interrupt
+
+    seen = {}
+
+    def gate():
+        seen["outcome"] = _guard(f"rm -rf {tmp_path / 'stopped'}")
+        seen["events"] = phone.events()  # the topic as Hermes' approval call returns
+
+    worker = threading.Thread(target=gate, daemon=True)
+    worker.start()
+    try:
+        note = phone.notification()
+        set_interrupt(True, worker.ident)  # what /stop and Ctrl-C do to the agent's thread
+        worker.join(15)
+    finally:
+        set_interrupt(False, worker.ident)
+    assert seen["outcome"]["approved"] is False and "interrupted" in seen["outcome"]["message"]
+    assert [e["sequence_id"] for e in seen["events"] if e["event"] == "message_delete"] == [note["id"]]
 
 
 def test_the_phone_sees_hermes_redacted_command(home, phone):

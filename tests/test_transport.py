@@ -25,12 +25,55 @@ def test_each_button_returns_its_decision(server_url, topic, phone, label, choic
 
 
 def test_the_answered_notification_is_withdrawn_from_every_device(server_url, topic, phone):
-    result = run_async(transport.present, Request(), _settings(server_url, topic))
+    request = Request()
+    result = run_async(transport.present, request, _settings(server_url, topic))
     note = phone.notification()
     phone.tap(note, "Deny")
     result.result(timeout=15)
+    transport.stop_waiting(request.request_id)  # Hermes' post_approval_response then finds nothing to do
     deletes = [e for e in phone.events() if e["event"] == "message_delete"]
     assert [e["sequence_id"] for e in deletes] == [note["id"]]
+
+
+def test_when_hermes_stops_waiting_the_notification_is_withdrawn_at_once(server_url, topic, phone):
+    """/stop or Ctrl-C: Hermes gives up before the deadline and says so (post_approval_response).
+    The buttons must go before that call returns, not stay live until the deadline."""
+    request = Request(timeout_seconds=120)
+    result = run_async(transport.present, request, _settings(server_url, topic))
+    note = phone.notification()
+    transport.stop_waiting(request.request_id)
+    deletes = [e for e in phone.events() if e["event"] == "message_delete"]
+    assert [e["sequence_id"] for e in deletes] == [note["id"]]
+    with pytest.raises(TimeoutError, match="stopped waiting"):
+        result.result(timeout=60)  # the worker lets go at its next stream event (a keepalive at worst)
+    transport.stop_waiting(request.request_id)  # repeated or unknown ids do nothing
+    transport.stop_waiting(None)
+    assert len([e for e in phone.events() if e["event"] == "message_delete"]) == 1
+
+
+@pytest.mark.parametrize("stage", ["subscribe", "publish"])
+def test_a_stop_that_lands_before_the_notification_is_up_leaves_nothing(server_url, topic, phone, stage):
+    """Hermes can give up while the reply stream opens (nothing is sent then) or while the
+    notification is being sent (it is withdrawn at once)."""
+    request = Request(timeout_seconds=120)
+
+    class StoppedEarly(client_mod.NtfyClient):
+        def subscribe(self, *args, **kwargs):
+            if stage == "subscribe":
+                transport.stop_waiting(request.request_id)
+            return super().subscribe(*args, **kwargs)
+
+        def publish(self, *args, **kwargs):
+            if stage == "publish":
+                transport.stop_waiting(request.request_id)
+            return super().publish(*args, **kwargs)
+
+    with pytest.raises(TimeoutError, match="stopped waiting"):
+        transport.present(request, _settings(server_url, topic), client=StoppedEarly(server_url))
+    events = phone.events()
+    published = [e["id"] for e in events if e["event"] == "message"]
+    assert len(published) == (stage == "publish")
+    assert [e["sequence_id"] for e in events if e["event"] == "message_delete"] == published
 
 
 def test_forged_and_foreign_replies_are_ignored(server_url, topic, phone):

@@ -1,5 +1,5 @@
 name: ntfy-approval
-version: 1.0.0
+version: 1.0.1
 manifest_version: 2
 api_version: 1
 description: >-
@@ -11,6 +11,8 @@ license: MIT
 homepage: https://github.com/AhmetArif0/hermes-ntfy-approval
 tags: [approvals, ntfy, notifications, mobile, security]
 requires_hermes: ">=0.21.5"
+provides_hooks:
+  - post_approval_response
 config_schema:
   server:
     type: str

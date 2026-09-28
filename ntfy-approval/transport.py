@@ -37,6 +37,7 @@ MAX_COMMAND_BYTES = 2000
 READ_TIMEOUT = 55.0  # longer than ntfy's 45 s keepalive, so a healthy stream never times out
 PUBLISH_TIMEOUT = 10.0
 WITHDRAW_TIMEOUT = 5.0
+STOP_WITHDRAW_TIMEOUT = 3.0  # Hermes waits for this after a /stop, so keep it short
 RETRY_DELAY = 2.0
 _TRANSIENT = (OSError, http.client.HTTPException, urllib.error.URLError)
 
@@ -56,6 +57,38 @@ class Settings:
     @property
     def reply_topic(self) -> str:
         return self.topic + REPLY_SUFFIX
+
+
+@dataclass
+class _Shown:
+    """A notification on the phone whose request Hermes may still be waiting for."""
+
+    client: NtfyClient
+    topic: str
+    message_id: Optional[str] = None  # set once published
+    stopped: bool = False  # Hermes is no longer waiting for the answer
+    withdrawn: bool = False
+
+
+# Requests ``present`` is working on, by request id, for ``stop_waiting``.
+_SHOWN: Dict[str, _Shown] = {}
+
+
+def _take(request_id: object) -> Optional[_Shown]:
+    return _SHOWN.pop(request_id, None) if isinstance(request_id, str) else None
+
+
+def stop_waiting(request_id: object) -> None:
+    """Hermes is done with ``request_id`` (answered, timed out, /stop, Ctrl-C). If its
+    notification is still up, withdraw it now: the worker thread may otherwise wait until the
+    request's deadline, or die with the process and leave live buttons on the phone."""
+    shown = _take(request_id)
+    if shown is not None:
+        shown.stopped = True
+        message_id = shown.message_id
+        if message_id is not None:  # else the worker withdraws what it is publishing right now
+            shown.withdrawn = True
+            _withdraw(shown.client, shown.topic, message_id, STOP_WITHDRAW_TIMEOUT)
 
 
 def normalize_server(value: object) -> str:
@@ -201,12 +234,17 @@ class _ReplyWatch:
             self._events = None
         self._early.clear()
 
-    def wait(self, request_id: str, tokens: Dict[str, str]) -> Optional[str]:
-        while self._remaining() > 0:
+    def wait(self, request_id: str, tokens: Dict[str, str],
+             stopped: Callable[[], bool] = lambda: False) -> Optional[str]:
+        """The tapped choice, or ``None`` at the deadline or once ``stopped()`` is true (checked
+        at every stream event; ntfy sends a keepalive at least every 45 s)."""
+        while self._remaining() > 0 and not stopped():
             try:
                 if self._events is None:
                     self.connect()
                 for event in self._stream():
+                    if stopped():
+                        break
                     self._note(event)
                     if event.get("event") == "message":
                         choice = match_reply(event.get("message"), request_id, tokens)
@@ -242,20 +280,25 @@ def present(request, settings: Settings, *, profile: str = "", client: Optional[
     if not tokens:
         raise ConfigError("the request offers no choice this transport can show")
     watch = _ReplyWatch(client, settings.reply_topic, deadline, clock, sleep)
-    published = None
+    shown = _SHOWN[request.request_id] = _Shown(client, settings.topic)
     choice = None
     try:
         watch.connect()
-        published = client.publish(build_notification(request, settings, tokens, profile=profile),
-                                   timeout=max(0.1, min(PUBLISH_TIMEOUT, deadline - clock())))
-        if watch.since is None:
-            watch.since = str(published["time"])
-        choice = watch.wait(request.request_id, tokens)
+        if not shown.stopped:
+            published = client.publish(build_notification(request, settings, tokens, profile=profile),
+                                       timeout=max(0.1, min(PUBLISH_TIMEOUT, deadline - clock())))
+            shown.message_id = published["id"]
+            if watch.since is None:
+                watch.since = str(published["time"])
+            choice = watch.wait(request.request_id, tokens, lambda: shown.stopped)
     finally:
         watch.close()
-        if published is not None:
-            _withdraw(client, settings.topic, published["id"],
+        _take(request.request_id)
+        if shown.message_id is not None and not shown.withdrawn:
+            _withdraw(client, settings.topic, shown.message_id,
                       WITHDRAW_TIMEOUT if choice is None else min(WITHDRAW_TIMEOUT, deadline - clock() - 1.0))
+    if shown.stopped:
+        raise TimeoutError("Hermes stopped waiting for this approval")
     if choice is None:
         raise TimeoutError("no answer from ntfy before the approval timed out")
     return request.respond(choice)

@@ -33,20 +33,28 @@ Hermes (main `35272ce28b` and v0.21.5 / `v2026.9.24`):
 7. `agent.secret_scope.get_secret` is the credential path the plugin-storage docs point to: it
    reads the profile scope, falls back to `os.environ` without multiplexing, and raises when a
    multiplexing process has no scope.
+8. The host's wait also ends at once when the turn is interrupted (`/stop`, Ctrl-C:
+   `tools.interrupt.is_interrupted`), with a `deny` (`interrupted`); the worker is not told and
+   keeps running. Right after its wait, whatever ended it, the host fires the
+   `post_approval_response` hook on the calling thread with the request's `request_id` and
+   `choice` (`once`/`session`/`deny`, or `transport_<failure>`). That hook is not run under
+   `hook_callback_timeout` (`hermes_cli/plugins_dispatch.py`). Verified 2026-09-28 on v0.21.5 and
+   main `aa96575ed1`: before 1.0.1 a stopped request kept its buttons on the phone until the
+   deadline, and forever when the process exited first.
 
 ntfy (server v2.28.0, built from source and run locally; docs):
 
-8. `POST /` with JSON publishes; unknown fields are ignored; the response carries `id` and `time`.
-9. Up to three action buttons. An `http` action makes the app send the request itself, with the
+9. `POST /` with JSON publishes; unknown fields are ignored; the response carries `id` and `time`.
+10. Up to three action buttons. An `http` action makes the app send the request itself, with the
    given method, headers and body; `clear: true` dismisses the notification after a successful
    request. Supported on Android, iOS and the web app per the docs.
-10. `GET /<topic>/json` sends an `open` event first, then cached messages from `since`, then live
+11. `GET /<topic>/json` sends an `open` event first, then cached messages from `since`, then live
     messages and keepalives (45 s default). `since=<unix time>` is inclusive; `since=<message id>`
     excludes that message.
-11. Without an explicit sequence id, a message's sequence id is its id, and
+12. Without an explicit sequence id, a message's sequence id is its id, and
     `DELETE /<topic>/<id>` publishes `message_delete`, which removes the notification from
     subscribed devices (server 2.16+). A DELETE for an unknown id still returns 200.
-12. With `auth-default-access: deny-all`: no credentials give 403, a wrong token 401, and
+13. With `auth-default-access: deny-all`: no credentials give 403, a wrong token 401, and
     `ntfy access everyone <topic> write-only` allows anonymous writes but not reads.
 
 ## Flow
@@ -65,6 +73,9 @@ ntfy (server v2.28.0, built from source and run locally; docs):
    worker never outlives it.
 7. Delete the notification (best effort), then return `request.respond(choice)` or raise
    `TimeoutError` at the deadline.
+8. If Hermes stops waiting first (fact 8), the `post_approval_response` hook deletes the
+   notification itself before Hermes moves on (3 s cap), and the worker lets go at its next
+   stream event. A pending request is withdrawn exactly once, by whichever side finishes first.
 
 ## Decisions
 
@@ -94,6 +105,9 @@ ntfy (server v2.28.0, built from source and run locally; docs):
   the request rate limit.
 - Answering `deny` ourselves at the timeout: it would be recorded as the user's explicit refusal.
   Letting the host time out keeps silence and refusal distinct.
+- Waking the worker after a stop by posting to the reply topic: one more request for a thread
+  that lets go at the next keepalive anyway. Deleting the notification in the hook is what the
+  user sees, and it also holds when the process exits right after.
 
 ## Verification
 
