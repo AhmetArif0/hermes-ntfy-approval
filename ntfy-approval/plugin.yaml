@@ -1,0 +1,39 @@
+name: ntfy-approval
+version: 1.0.0
+manifest_version: 2
+api_version: 1
+description: >-
+  Answer Hermes' approval prompts from your phone. When Hermes asks before running a flagged
+  command, the request arrives as an ntfy push notification with Approve once, Approve for session
+  and Deny buttons. No port is opened on your machine; silence still means deny.
+author: AhmetArif0
+license: MIT
+homepage: https://github.com/AhmetArif0/hermes-ntfy-approval
+tags: [approvals, ntfy, notifications, mobile, security]
+requires_hermes: ">=0.21.5"
+config_schema:
+  server:
+    type: str
+    default: "https://ntfy.sh"
+    label: ntfy server
+    description: The ntfy server your phone is subscribed on. Use your own server for private approvals.
+  priority:
+    type: str
+    choices: [min, low, default, high, urgent]
+    default: high
+    label: Notification priority
+  send_command:
+    type: bool
+    default: true
+    label: Include the command
+    description: Off sends only Hermes' reason for asking, not the (redacted) command text.
+  topic:
+    type: secret
+    env: NTFY_APPROVAL_TOPIC
+    label: Topic
+    description: A long random topic name. `hermes ntfy-approval setup` makes one.
+  token:
+    type: secret
+    env: NTFY_APPROVAL_TOKEN
+    label: Access token
+    description: Only for servers with access control.

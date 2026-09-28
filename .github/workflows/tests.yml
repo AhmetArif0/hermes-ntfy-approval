@@ -1,0 +1,105 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "29 5 * * *"  # daily, to catch Hermes changes that break the plugin
+
+permissions:
+  contents: read
+
+env:
+  NTFY_VERSION: "2.28.0"
+  NTFY_SHA256: "881a1530e30e01f1dec202c7f41e1664e57edfb7844e73e21e345159ac3ea9b7"
+
+jobs:
+  unit:
+    name: unit (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install pytest
+      - run: python -m pytest tests -q -rs
+
+  real-ntfy:
+    name: against a real ntfy server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install pytest
+      - name: Download ntfy
+        run: |
+          curl -fsSL -o ntfy.tar.gz "https://github.com/binwiederhier/ntfy/releases/download/v${NTFY_VERSION}/ntfy_${NTFY_VERSION}_linux_amd64.tar.gz"
+          echo "${NTFY_SHA256}  ntfy.tar.gz" | sha256sum -c -
+          tar xzf ntfy.tar.gz
+          mv "ntfy_${NTFY_VERSION}_linux_amd64/ntfy" "$RUNNER_TEMP/ntfy"
+      - name: Start an open server and one with access control
+        run: |
+          N="$RUNNER_TEMP/ntfy"
+          common="--visitor-request-limit-exempt-hosts 127.0.0.1 --keepalive-interval 5s"
+          nohup "$N" serve --listen-http 127.0.0.1:8080 --base-url http://127.0.0.1:8080 \
+            --cache-file "$RUNNER_TEMP/open.db" $common > "$RUNNER_TEMP/open.log" 2>&1 &
+          export NTFY_AUTH_FILE="$RUNNER_TEMP/auth.db"
+          nohup "$N" serve --listen-http 127.0.0.1:8081 --base-url http://127.0.0.1:8081 \
+            --auth-file "$NTFY_AUTH_FILE" --auth-default-access deny-all $common > "$RUNNER_TEMP/auth.log" 2>&1 &
+          for port in 8080 8081; do
+            for i in $(seq 1 50); do curl -fs "http://127.0.0.1:$port/v1/health" && break; sleep 0.2; done
+          done
+          # The README's self-hosting recipe.
+          NTFY_PASSWORD=ci-password "$N" user add hermes
+          "$N" access hermes hermes-approvals rw
+          "$N" access hermes hermes-approvals-reply rw
+          "$N" access everyone hermes-approvals-reply write-only
+          token=$("$N" token add hermes | grep -o 'tk_[A-Za-z0-9]*')
+          echo "::add-mask::$token"
+          echo "NTFY_TEST_AUTH_TOKEN=$token" >> "$GITHUB_ENV"
+      - name: Test against the real servers
+        env:
+          NTFY_TEST_SERVER: http://127.0.0.1:8080
+          NTFY_TEST_AUTH_SERVER: http://127.0.0.1:8081
+          NTFY_TEST_AUTH_TOPIC: hermes-approvals
+        run: python -m pytest tests -q -rs
+
+  hermes:
+    name: end-to-end (Hermes ${{ matrix.ref }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ref: v2026.9.24  # v0.21.5, the minimum in requires_hermes
+            sync: --extra dev
+          - ref: main
+            sync: --group dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.ref }}
+          path: hermes
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Hermes
+        working-directory: hermes
+        run: uv sync --frozen ${{ matrix.sync }}
+      - name: Test against Hermes
+        env:
+          PYTHONPATH: ${{ github.workspace }}/hermes
+        run: hermes/.venv/bin/python -m pytest tests -q -rs
+      - name: hermes plugins validate
+        env:
+          PYTHONPATH: ${{ github.workspace }}/hermes
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+        run: hermes/.venv/bin/python -m hermes_cli.main plugins validate ntfy-approval
